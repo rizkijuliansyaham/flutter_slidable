@@ -98,7 +98,19 @@ class StillGesture extends EndGesture {
 
 /// Represents a way to control a slidable from outside.
 class SlidableController {
+  static final List<SlidableController> _controllers = [];
+  
   /// Creates a [SlidableController].
+  // SlidableController(TickerProvider vsync)
+  //     : _animationController = AnimationController(vsync: vsync),
+  //       endGesture = ValueNotifier(null),
+  //       _dismissGesture = _ValueNotifier(null),
+  //       resizeRequest = ValueNotifier(null),
+  //       actionPaneType = ValueNotifier(ActionPaneType.none),
+  //       direction = ValueNotifier(0) {
+  //   direction.addListener(_onDirectionChanged);
+  // }
+
   SlidableController(TickerProvider vsync)
       : _animationController = AnimationController(vsync: vsync),
         endGesture = ValueNotifier(null),
@@ -107,7 +119,33 @@ class SlidableController {
         actionPaneType = ValueNotifier(ActionPaneType.none),
         direction = ValueNotifier(0) {
     direction.addListener(_onDirectionChanged);
+
+    // Tambahkan ke daftar controller global
+    _controllers.add(this);
+
+     // Listen perubahan ratio untuk auto-close yang lain
+    _animationController.addListener(() {
+      if (isExtended) {
+        for (final c in _controllers) {
+          if (c != this && c.isExtended) {
+            c.close();
+          }
+        }
+      }
+    });
   }
+
+   /// Apakah Slidable sedang terbuka (sebagian atau penuh).
+  bool get isExtended => _animationController.value > 0;
+
+  /// Apakah Slidable tertutup penuh.
+  bool get isClosed => _animationController.value == 0;
+
+  /// Apakah Slidable terbuka penuh sesuai konfigurasi extent.
+  bool get isFullyExtended =>
+      _animationController.value ==
+      (actionPaneConfigurator?.extentRatio ?? 0);
+
 
   final AnimationController _animationController;
   final _ValueNotifier<DismissGesture?> _dismissGesture;
@@ -338,6 +376,8 @@ class SlidableController {
     );
     resizeRequest.value = request;
   }
+
+  
 
   /// Disposes the controller.
   void dispose() {
