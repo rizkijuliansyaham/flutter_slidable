@@ -381,6 +381,7 @@ class SlidableController {
 
   /// Disposes the controller.
   void dispose() {
+    _controllers.remove(this); // hapus dari daftar global
     _animationController.stop();
     _animationController.dispose();
     direction.removeListener(_onDirectionChanged);
