@@ -100,17 +100,6 @@ class StillGesture extends EndGesture {
 class SlidableController {
   static final List<SlidableController> _controllers = [];
   
-  /// Creates a [SlidableController].
-  // SlidableController(TickerProvider vsync)
-  //     : _animationController = AnimationController(vsync: vsync),
-  //       endGesture = ValueNotifier(null),
-  //       _dismissGesture = _ValueNotifier(null),
-  //       resizeRequest = ValueNotifier(null),
-  //       actionPaneType = ValueNotifier(ActionPaneType.none),
-  //       direction = ValueNotifier(0) {
-  //   direction.addListener(_onDirectionChanged);
-  // }
-
   SlidableController(TickerProvider vsync)
       : _animationController = AnimationController(vsync: vsync),
         endGesture = ValueNotifier(null),
@@ -123,29 +112,55 @@ class SlidableController {
     // Tambahkan ke daftar controller global
     _controllers.add(this);
 
-     // Listen perubahan ratio untuk auto-close yang lain
-    _animationController.addListener(() {
-      if (isExtended) {
-        for (final c in _controllers) {
-          if (c != this && c.isExtended) {
-            c.close();
-          }
-        }
-      }
-    });
+    // Listen perubahan animasi untuk auto-close yang lain
+    _animationController.addListener(_onAnimationChanged);
   }
 
-   /// Apakah Slidable sedang terbuka (sebagian atau penuh).
+  // Flag untuk mencegah loop infinite saat menutup controller lain
+  bool _isClosingOthers = false;
+  
+  void _onAnimationChanged() {
+    // Jangan lakukan auto-close jika sedang dalam proses menutup controller lain
+    if (_isClosingOthers) return;
+    
+    // Hanya lakukan auto-close ketika controller ini benar-benar sudah terbuka
+    // dan tidak sedang dalam proses menutup
+    if (isFullyExtended && !_closing) {
+      _closeOtherControllers();
+    }
+  }
+
+  void _closeOtherControllers() {
+    _isClosingOthers = true;
+    
+    for (final controller in _controllers) {
+      if (controller != this && controller.isExtended && !controller._closing) {
+        // Tutup tanpa animasi untuk menghindari konflik
+        controller._closeImmediately();
+      }
+    }
+    
+    _isClosingOthers = false;
+  }
+
+  // Method untuk menutup langsung tanpa animasi
+  void _closeImmediately() {
+    _animationController.value = 0;
+    direction.value = 0;
+  }
+
+  /// Apakah Slidable sedang terbuka (sebagian atau penuh).
   bool get isExtended => _animationController.value > 0;
 
   /// Apakah Slidable tertutup penuh.
   bool get isClosed => _animationController.value == 0;
 
   /// Apakah Slidable terbuka penuh sesuai konfigurasi extent.
-  bool get isFullyExtended =>
-      _animationController.value ==
-      (actionPaneConfigurator?.extentRatio ?? 0);
-
+  bool get isFullyExtended {
+    final extentRatio = actionPaneConfigurator?.extentRatio ?? 0;
+    return extentRatio > 0 && 
+           (_animationController.value >= extentRatio - 0.01); // Toleransi kecil untuk floating point
+  }
 
   final AnimationController _animationController;
   final _ValueNotifier<DismissGesture?> _dismissGesture;
@@ -377,11 +392,10 @@ class SlidableController {
     resizeRequest.value = request;
   }
 
-  
-
   /// Disposes the controller.
   void dispose() {
     _controllers.remove(this); // hapus dari daftar global
+    _animationController.removeListener(_onAnimationChanged);
     _animationController.stop();
     _animationController.dispose();
     direction.removeListener(_onDirectionChanged);
