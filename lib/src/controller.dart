@@ -105,12 +105,16 @@ class SlidableController {
     this.onFullyExtended,
     this.fullWidthDuration = const Duration(milliseconds: 300),
     this.fullWidthDelay = const Duration(milliseconds: 500),
-  }) : _animationController = AnimationController(vsync: vsync),
-        endGesture = ValueNotifier(null),
-        _dismissGesture = _ValueNotifier(null),
-        resizeRequest = ValueNotifier(null),
-        actionPaneType = ValueNotifier(ActionPaneType.none),
-        direction = ValueNotifier(0) {
+    this.snapBackThresholdRatio = 0.5, // [Snap-back logic] Default 1/2 extentRatio
+    this.allowFullWidthBeyondExtentRatio = false, // [Full-width logic] Default false
+  }) : assert(snapBackThresholdRatio >= 0 && snapBackThresholdRatio <= 1,
+            'snapBackThresholdRatio must be between 0 and 1'),
+        _animationController = AnimationController(vsync: vsync),
+        endGesture = ValueNotifier<EndGesture?>(null),
+        _dismissGesture = _ValueNotifier<DismissGesture?>(null),
+        resizeRequest = ValueNotifier<ResizeRequest?>(null),
+        actionPaneType = ValueNotifier<ActionPaneType>(ActionPaneType.none),
+        direction = ValueNotifier<int>(0) {
     direction.addListener(_onDirectionChanged);
 
     // Tambahkan ke daftar controller global
@@ -129,15 +133,135 @@ class SlidableController {
   /// Delay sebelum auto close setelah full width
   final Duration fullWidthDelay;
   
-  // Flag untuk mencegah multiple callback calls
-  bool _hasCalledFullyExtended = false;
-  
-  // Flag untuk mencegah auto-close saat dalam proses full width animation
-  bool _isInFullWidthAnimation = false;
+  /// Persentase batas kapan Slidable akan snap-back (0.0 - 1.0)
+  final double snapBackThresholdRatio; // [Snap-back logic]
 
-  // Flag untuk mencegah loop infinite saat menutup controller lain
+  /// Whether the action pane is allowed to slide beyond extentRatio to full width
+  final bool allowFullWidthBeyondExtentRatio; // [Full-width logic]
+
+  bool _hasCalledFullyExtended = false;
+  bool _isInFullWidthAnimation = false;
   bool _isClosingOthers = false;
-  
+
+  final AnimationController _animationController;
+  final _ValueNotifier<DismissGesture?> _dismissGesture;
+
+  /// Whether the start action pane is enabled.
+  bool enableStartActionPane = true;
+
+  /// Whether the end action pane is enabled.
+  bool enableEndActionPane = true;
+
+  /// Whether the start action pane is at the left (if horizontal).
+  /// Defaults to true.
+  bool isLeftToRight = true;
+
+  double _startActionPaneExtentRatio = 0.0;
+  double _endActionPaneExtentRatio = 0.0;
+
+  /// The current action pane configurator.
+  RatioConfigurator? get actionPaneConfigurator => _actionPaneConfigurator;
+  RatioConfigurator? _actionPaneConfigurator;
+  set actionPaneConfigurator(RatioConfigurator? value) {
+    if (_actionPaneConfigurator != value) {
+      _actionPaneConfigurator = value;
+      if (_replayEndGesture && value != null) {
+        _replayEndGesture = false;
+        value.handleEndGestureChanged();
+      }
+    }
+  }
+
+  bool _replayEndGesture = false;
+
+  /// The value of the ratio over time.
+  Animation<double> get animation => _animationController.view;
+
+  /// Track the end gestures.
+  final ValueNotifier<EndGesture?> endGesture;
+
+  /// Track the dismiss gestures.
+  ValueNotifier<DismissGesture?> get dismissGesture => _dismissGesture;
+
+  /// Track the resize requests.
+  final ValueNotifier<ResizeRequest?> resizeRequest;
+
+  /// Track the type of the action pane.
+  final ValueNotifier<ActionPaneType> actionPaneType;
+
+  /// Track the direction in which the slidable moves.
+  ///
+  /// -1 means that the slidable is moving to the left.
+  ///  0 means that the slidable is not moving.
+  ///  1 means that the slidable is moving to the right.
+  final ValueNotifier<int> direction;
+
+  /// Indicates whether the dismissible registered to gestures.
+  bool get isDismissibleReady => _dismissGesture._hasListeners;
+
+  /// Whether this [close()] method has been called and not finished.
+  bool get closing => _closing;
+  bool _closing = false;
+
+  bool _acceptRatio(double ratio) {
+    return !_closing &&
+        (ratio == 0 ||
+            ((ratio > 0 && enablePositiveActionPane) ||
+                (ratio < 0 && enableNegativeActionPane)));
+  }
+
+  /// Whether the positive action pane is enabled.
+  bool get enablePositiveActionPane =>
+      isLeftToRight ? enableStartActionPane : enableEndActionPane;
+
+  /// Whether the negative action pane is enabled.
+  bool get enableNegativeActionPane =>
+      isLeftToRight ? enableEndActionPane : enableStartActionPane;
+
+  /// The extent ratio of the start action pane.
+  double get startActionPaneExtentRatio => _startActionPaneExtentRatio;
+  set startActionPaneExtentRatio(double value) {
+    if (_startActionPaneExtentRatio != value && value >= 0 && value <= 1) {
+      _startActionPaneExtentRatio = value;
+    }
+  }
+
+  /// The extent ratio of the end action pane.
+  double get endActionPaneExtentRatio => _endActionPaneExtentRatio;
+  set endActionPaneExtentRatio(double value) {
+    if (_endActionPaneExtentRatio != value && value >= 0 && value <= 1) {
+      _endActionPaneExtentRatio = value;
+    }
+  }
+
+  /// The current ratio of the full size of the [Slidable] that is already
+  /// dragged.
+  ///
+  /// This is between -1 and 1.
+  /// Between -1 (inclusive) and 0(exclusive), the action pane is
+  /// [ActionPaneType.end].
+  /// Between 0 (exclusive) and 1 (inclusive), the action pane is
+  /// [ActionPaneType.start].
+  double get ratio => _animationController.value * direction.value;
+  set ratio(double value) {
+    final double newRatio = (actionPaneConfigurator?.normalizeRatio(value)) ?? value;
+
+    // [Full-width logic] compute extent once
+    final double extent = actionPaneConfigurator?.extentRatio ?? 0.0;
+
+    // clamp returns num, convert to double
+    final num clampedNum = allowFullWidthBeyondExtentRatio
+        ? newRatio.clamp(-1.0, 1.0)
+        : newRatio.clamp(-extent, extent);
+
+    final double allowedRatio = clampedNum.toDouble();
+
+    if (_acceptRatio(allowedRatio) && allowedRatio != ratio) {
+      direction.value = allowedRatio.sign.toInt();
+      _animationController.value = allowedRatio.abs().toDouble();
+    }
+  }
+
   void _onAnimationChanged() {
     // Jangan lakukan auto-close jika sedang dalam proses menutup controller lain
     // atau sedang dalam proses full width animation
@@ -211,130 +335,23 @@ class SlidableController {
 
   // Method untuk menutup langsung tanpa animasi
   void _closeImmediately() {
-    _animationController.value = 0;
+    _animationController.value = 0.0;
     direction.value = 0;
     _hasCalledFullyExtended = false; // Reset callback flag
     _isInFullWidthAnimation = false; // Reset full width flag
   }
 
   /// Apakah Slidable sedang terbuka (sebagian atau penuh).
-  bool get isExtended => _animationController.value > 0;
+  bool get isExtended => _animationController.value > 0.0;
 
   /// Apakah Slidable tertutup penuh.
-  bool get isClosed => _animationController.value == 0;
+  bool get isClosed => _animationController.value == 0.0;
 
   /// Apakah Slidable terbuka penuh sesuai konfigurasi extent.
   bool get isFullyExtended {
-    final extentRatio = actionPaneConfigurator?.extentRatio ?? 0;
-    return extentRatio > 0 && 
+    final extentRatio = actionPaneConfigurator?.extentRatio ?? 0.0;
+    return extentRatio > 0.0 && 
            (_animationController.value >= extentRatio - 0.01); // Toleransi kecil untuk floating point
-  }
-
-  final AnimationController _animationController;
-  final _ValueNotifier<DismissGesture?> _dismissGesture;
-
-  /// Whether the start action pane is enabled.
-  bool enableStartActionPane = true;
-
-  /// Whether the end action pane is enabled.
-  bool enableEndActionPane = true;
-
-  /// Whether the start action pane is at the left (if horizontal).
-  /// Defaults to true.
-  bool isLeftToRight = true;
-
-  /// Whether the positive action pane is enabled.
-  bool get enablePositiveActionPane =>
-      isLeftToRight ? enableStartActionPane : enableEndActionPane;
-
-  /// Whether the negative action pane is enabled.
-  bool get enableNegativeActionPane =>
-      isLeftToRight ? enableEndActionPane : enableStartActionPane;
-
-  /// The extent ratio of the start action pane.
-  double get startActionPaneExtentRatio => _startActionPaneExtentRatio;
-  double _startActionPaneExtentRatio = 0;
-  set startActionPaneExtentRatio(double value) {
-    if (_startActionPaneExtentRatio != value && value >= 0 && value <= 1) {
-      _startActionPaneExtentRatio = value;
-    }
-  }
-
-  /// The extent ratio of the end action pane.
-  double get endActionPaneExtentRatio => _endActionPaneExtentRatio;
-  double _endActionPaneExtentRatio = 0;
-  set endActionPaneExtentRatio(double value) {
-    if (_endActionPaneExtentRatio != value && value >= 0 && value <= 1) {
-      _endActionPaneExtentRatio = value;
-    }
-  }
-
-  /// The current action pane configurator.
-  RatioConfigurator? get actionPaneConfigurator => _actionPaneConfigurator;
-  RatioConfigurator? _actionPaneConfigurator;
-  set actionPaneConfigurator(RatioConfigurator? value) {
-    if (_actionPaneConfigurator != value) {
-      _actionPaneConfigurator = value;
-      if (_replayEndGesture && value != null) {
-        _replayEndGesture = false;
-        value.handleEndGestureChanged();
-      }
-    }
-  }
-
-  bool _replayEndGesture = false;
-
-  /// The value of the ratio over time.
-  Animation<double> get animation => _animationController.view;
-
-  /// Track the end gestures.
-  final ValueNotifier<EndGesture?> endGesture;
-
-  /// Track the dismiss gestures.
-  ValueNotifier<DismissGesture?> get dismissGesture => _dismissGesture;
-
-  /// Track the resize requests.
-  final ValueNotifier<ResizeRequest?> resizeRequest;
-
-  /// Track the type of the action pane.
-  final ValueNotifier<ActionPaneType> actionPaneType;
-
-  /// Track the direction in which the slidable moves.
-  ///
-  /// -1 means that the slidable is moving to the left.
-  ///  0 means that the slidable is not moving.
-  ///  1 means that the slidable is moving to the right.
-  final ValueNotifier<int> direction;
-
-  /// Indicates whether the dismissible registered to gestures.
-  bool get isDismissibleReady => _dismissGesture._hasListeners;
-
-  /// Whether this [close()] method has been called and not finished.
-  bool get closing => _closing;
-  bool _closing = false;
-
-  bool _acceptRatio(double ratio) {
-    return !_closing &&
-        (ratio == 0 ||
-            ((ratio > 0 && enablePositiveActionPane) ||
-                (ratio < 0 && enableNegativeActionPane)));
-  }
-
-  /// The current ratio of the full size of the [Slidable] that is already
-  /// dragged.
-  ///
-  /// This is between -1 and 1.
-  /// Between -1 (inclusive) and 0(exclusive), the action pane is
-  /// [ActionPaneType.end].
-  /// Between 0 (exclusive) and 1 (inclusive), the action pane is
-  /// [ActionPaneType.start].
-  double get ratio => _animationController.value * direction.value;
-  set ratio(double value) {
-    final newRatio = (actionPaneConfigurator?.normalizeRatio(value)) ?? value;
-    if (_acceptRatio(newRatio) && newRatio != ratio) {
-      direction.value = newRatio.sign.toInt();
-      _animationController.value = newRatio.abs();
-    }
   }
 
   void _onDirectionChanged() {
@@ -358,19 +375,19 @@ class SlidableController {
       endGesture.value = ClosingGesture(velocity.abs());
     }
 
-    // Snap-back logic
-    final extent = actionPaneConfigurator?.extentRatio ?? 0;
-    if (extent > 0) {
-      final progress = _animationController.value;
-      if (progress < extent / 2) {
-        // Kurang dari setengah extent → close
+    // [Snap-back logic: gunakan snapBackThresholdRatio]
+    final double extent = actionPaneConfigurator?.extentRatio ?? 0.0;
+    if (extent > 0.0) {
+      final double progress = _animationController.value;
+      if (progress < extent * snapBackThresholdRatio) {
+        // Kurang dari threshold → close
         close(
           duration: const Duration(milliseconds: 200),
           curve: Curves.easeOut,
         );
         return;
       } else {
-        // Lebih dari setengah extent → buka penuh
+        // Lebih dari threshold → buka penuh
         openCurrentActionPane(
           duration: const Duration(milliseconds: 200),
           curve: Curves.easeOut,
@@ -379,8 +396,6 @@ class SlidableController {
       }
     }
 
-    // If the movement is too fast, the actionPaneConfigurator may still be
-    // null. So we have to replay the end gesture when it will not be null.
     if (actionPaneConfigurator == null) {
       _replayEndGesture = true;
     }
@@ -394,7 +409,7 @@ class SlidableController {
     _closing = true;
     _isInFullWidthAnimation = false; // Stop full width animation jika sedang berjalan
     await _animationController.animateBack(
-      0,
+      0.0,
       duration: duration,
       curve: curve,
     );
@@ -422,7 +437,7 @@ class SlidableController {
   }) async {
     if (actionPaneType.value != ActionPaneType.start) {
       direction.value = isLeftToRight ? 1 : -1;
-      ratio = 0;
+      ratio = 0.0;
     }
 
     return openTo(
@@ -439,7 +454,7 @@ class SlidableController {
   }) async {
     if (actionPaneType.value != ActionPaneType.end) {
       direction.value = isLeftToRight ? -1 : 1;
-      ratio = 0;
+      ratio = 0.0;
     }
 
     return openTo(
@@ -463,11 +478,11 @@ class SlidableController {
 
     // Edge case: to be able to correctly set the sign when the value is zero,
     // we have to manually set the ratio to a tiny amount.
-    if (_animationController.value == 0) {
-      this.ratio = 0.05 * ratio.sign;
+    if (_animationController.value == 0.0) {
+      this.ratio = (0.05 * ratio.sign).toDouble();
     }
     return _animationController.animateTo(
-      ratio.abs(),
+      ratio.abs().toDouble(),
       duration: duration,
       curve: curve,
     );
@@ -480,7 +495,7 @@ class SlidableController {
     Curve curve = _defaultCurve,
   }) async {
     await _animationController.animateTo(
-      1,
+      1.0,
       duration: _defaultMovementDuration,
       curve: curve,
     );
