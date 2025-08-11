@@ -100,8 +100,12 @@ class StillGesture extends EndGesture {
 class SlidableController {
   static final List<SlidableController> _controllers = [];
   
-  SlidableController(TickerProvider vsync)
-      : _animationController = AnimationController(vsync: vsync),
+  SlidableController(
+    TickerProvider vsync, {
+    this.onFullyExtended,
+    this.fullWidthDuration = const Duration(milliseconds: 300),
+    this.fullWidthDelay = const Duration(milliseconds: 500),
+  }) : _animationController = AnimationController(vsync: vsync),
         endGesture = ValueNotifier(null),
         _dismissGesture = _ValueNotifier(null),
         resizeRequest = ValueNotifier(null),
@@ -116,17 +120,79 @@ class SlidableController {
     _animationController.addListener(_onAnimationChanged);
   }
 
+  /// Callback yang dipanggil ketika slidable mencapai posisi fully extended
+  final VoidCallback? onFullyExtended;
+  
+  /// Durasi animasi untuk extend ke full width
+  final Duration fullWidthDuration;
+  
+  /// Delay sebelum auto close setelah full width
+  final Duration fullWidthDelay;
+  
+  // Flag untuk mencegah multiple callback calls
+  bool _hasCalledFullyExtended = false;
+  
+  // Flag untuk mencegah auto-close saat dalam proses full width animation
+  bool _isInFullWidthAnimation = false;
+
   // Flag untuk mencegah loop infinite saat menutup controller lain
   bool _isClosingOthers = false;
   
   void _onAnimationChanged() {
     // Jangan lakukan auto-close jika sedang dalam proses menutup controller lain
-    if (_isClosingOthers) return;
+    // atau sedang dalam proses full width animation
+    if (_isClosingOthers || _isInFullWidthAnimation) return;
+    
+    // Check untuk fully extended callback
+    final currentlyFullyExtended = isFullyExtended;
+    
+    // Panggil callback hanya sekali ketika mencapai fully extended
+    if (currentlyFullyExtended && !_hasCalledFullyExtended && onFullyExtended != null) {
+      _hasCalledFullyExtended = true;
+      // Jalankan animasi full width dengan auto close
+      _animateToFullWidthThenClose();
+    }
+    
+    // Reset flag ketika tidak fully extended
+    if (!currentlyFullyExtended) {
+      _hasCalledFullyExtended = false;
+    }
     
     // Hanya lakukan auto-close ketika controller ini benar-benar sudah terbuka
-    // dan tidak sedang dalam proses menutup
-    if (isFullyExtended && !_closing) {
+    // dan tidak sedang dalam proses menutup atau full width animation
+    if (currentlyFullyExtended && !_closing && !_isInFullWidthAnimation) {
       _closeOtherControllers();
+    }
+  }
+
+  /// Animasi ke full width kemudian auto close
+  Future<void> _animateToFullWidthThenClose() async {
+    if (_isInFullWidthAnimation || _closing) return;
+    
+    _isInFullWidthAnimation = true;
+    
+    try {
+      // Panggil callback terlebih dahulu
+      onFullyExtended?.call();
+      
+      // Animasi ke full width (ratio 1.0)
+      await _animationController.animateTo(
+        1.0,
+        duration: fullWidthDuration,
+        curve: Curves.easeOut,
+      );
+      
+      // Tunggu delay sebelum close
+      await Future.delayed(fullWidthDelay);
+      
+      // Auto close
+      await close(
+        duration: fullWidthDuration,
+        curve: Curves.easeIn,
+      );
+      
+    } finally {
+      _isInFullWidthAnimation = false;
     }
   }
 
@@ -147,6 +213,8 @@ class SlidableController {
   void _closeImmediately() {
     _animationController.value = 0;
     direction.value = 0;
+    _hasCalledFullyExtended = false; // Reset callback flag
+    _isInFullWidthAnimation = false; // Reset full width flag
   }
 
   /// Apakah Slidable sedang terbuka (sebagian atau penuh).
@@ -299,12 +367,14 @@ class SlidableController {
     Curve curve = _defaultCurve,
   }) async {
     _closing = true;
+    _isInFullWidthAnimation = false; // Stop full width animation jika sedang berjalan
     await _animationController.animateBack(
       0,
       duration: duration,
       curve: curve,
     );
     direction.value = 0;
+    _hasCalledFullyExtended = false; // Reset callback flag saat close
     _closing = false;
   }
 
@@ -362,7 +432,7 @@ class SlidableController {
   }) async {
     assert(ratio >= -1 && ratio <= 1);
 
-    if (_closing) {
+    if (_closing || _isInFullWidthAnimation) {
       return;
     }
 
