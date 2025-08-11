@@ -345,6 +345,10 @@ class SlidableController {
 
   /// Dispatches a new [EndGesture] determined by the given [velocity] and
   /// [direction].
+  ///
+  /// Ditambah logika:
+  /// - Jika extent belum mencapai setengah extentRatio → close
+  /// - Jika lebih dari setengah extentRatio → buka penuh
   void dispatchEndGesture(double? velocity, GestureDirection direction) {
     if (velocity == 0 || velocity == null) {
       endGesture.value = StillGesture(direction);
@@ -352,6 +356,27 @@ class SlidableController {
       endGesture.value = OpeningGesture(velocity);
     } else {
       endGesture.value = ClosingGesture(velocity.abs());
+    }
+
+    // Snap-back logic
+    final extent = actionPaneConfigurator?.extentRatio ?? 0;
+    if (extent > 0) {
+      final progress = _animationController.value;
+      if (progress < extent / 2) {
+        // Kurang dari setengah extent → close
+        close(
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+        );
+        return;
+      } else {
+        // Lebih dari setengah extent → buka penuh
+        openCurrentActionPane(
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+        );
+        return;
+      }
     }
 
     // If the movement is too fast, the actionPaneConfigurator may still be
